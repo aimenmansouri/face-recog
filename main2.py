@@ -13,7 +13,7 @@ class LightweightFaceAttendance:
         self.database_path = database_path
         self.attendance_log = attendance_log
         self.recognizer = cv2.face.LBPHFaceRecognizer_create()
-        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
         self.employee_ids = {}  # Map of ID to name
         self.led_pin = 17  # GPIO pin for success LED
         self.buzzer_pin = 18  # GPIO pin for buzzer
