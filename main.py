@@ -4,15 +4,15 @@ import os
 import time
 from datetime import datetime
 import csv
-import face_recognition
 import RPi.GPIO as GPIO
 
-class FaceRecognitionAttendance:
+class LightweightFaceAttendance:
     def __init__(self, database_path="employees", attendance_log="attendance.csv"):
         self.database_path = database_path
         self.attendance_log = attendance_log
-        self.known_face_encodings = []
-        self.known_face_names = []
+        self.recognizer = cv2.face.LBPHFaceRecognizer_create()
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.employee_ids = {}  # Map of ID to name
         self.led_pin = 17  # GPIO pin for success LED
         self.buzzer_pin = 18  # GPIO pin for buzzer
         
@@ -25,41 +25,96 @@ class FaceRecognitionAttendance:
         if not os.path.exists(database_path):
             os.makedirs(database_path)
             
+        # Create models directory
+        if not os.path.exists("models"):
+            os.makedirs("models")
+            
         # Create attendance log if it doesn't exist
         if not os.path.exists(attendance_log):
             with open(attendance_log, 'w', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerow(["Name", "Date", "Time"])
         
-        # Load known faces
-        self.load_known_faces()
+        # Load or train the model
+        self.load_or_train_model()
     
-    def load_known_faces(self):
-        """Load employee faces from the database directory"""
-        print("Loading employee database...")
+    def load_or_train_model(self):
+        """Load existing model or train a new one if necessary"""
+        model_path = "models/face_recognizer.yml"
+        id_map_path = "models/employee_ids.csv"
         
+        # Check if model and ID mapping exist
+        if os.path.exists(model_path) and os.path.exists(id_map_path):
+            # Load the model
+            self.recognizer.read(model_path)
+            
+            # Load the ID to name mapping
+            with open(id_map_path, 'r') as file:
+                for line in file:
+                    if line.strip():
+                        parts = line.strip().split(',')
+                        if len(parts) == 2:
+                            emp_id, name = parts
+                            self.employee_ids[int(emp_id)] = name
+            
+            print(f"Model loaded. {len(self.employee_ids)} employees registered.")
+        else:
+            # Train the model
+            self.train_model()
+    
+    def train_model(self):
+        """Train the face recognition model with current employee database"""
+        print("Training model with employee database...")
+        
+        faces = []
+        ids = []
+        
+        next_id = 1
+        id_map = {}
+        
+        # Process each image in the database
         for filename in os.listdir(self.database_path):
             if filename.endswith(".jpg") or filename.endswith(".png"):
                 # Get employee name from filename (without extension)
                 name = os.path.splitext(filename)[0]
                 
-                # Load image and get face encoding
-                image_path = os.path.join(self.database_path, filename)
-                image = face_recognition.load_image_file(image_path)
+                # Assign an ID
+                emp_id = next_id
+                next_id += 1
+                id_map[emp_id] = name
                 
-                # Try to find a face in the image
-                face_encodings = face_recognition.face_encodings(image)
+                # Load image
+                img_path = os.path.join(self.database_path, filename)
+                img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
                 
-                if len(face_encodings) > 0:
-                    # Take the first face found in the image
-                    encoding = face_encodings[0]
-                    self.known_face_encodings.append(encoding)
-                    self.known_face_names.append(name)
-                    print(f"Loaded: {name}")
-                else:
-                    print(f"Warning: No face found in {filename}")
+                # Detect faces
+                detected_faces = self.face_cascade.detectMultiScale(
+                    img,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(30, 30)
+                )
+                
+                # Add each face to training data
+                for (x, y, w, h) in detected_faces:
+                    faces.append(img[y:y+h, x:x+w])
+                    ids.append(emp_id)
+                    print(f"Processed: {name}")
+                    break  # Use only the first face found in each image
         
-        print(f"Database loaded. {len(self.known_face_names)} employees registered.")
+        # Save ID mapping
+        self.employee_ids = id_map
+        with open("models/employee_ids.csv", 'w') as file:
+            for emp_id, name in id_map.items():
+                file.write(f"{emp_id},{name}\n")
+        
+        # Train the model
+        if len(faces) > 0:
+            self.recognizer.train(faces, np.array(ids))
+            self.recognizer.save("models/face_recognizer.yml")
+            print(f"Model trained and saved with {len(faces)} faces from {len(id_map)} employees.")
+        else:
+            print("No faces found in the database. Model not trained.")
     
     def mark_attendance(self, name):
         """Record attendance in the CSV file"""
@@ -117,38 +172,46 @@ class FaceRecognitionAttendance:
                     print("Failed to capture image")
                     break
                 
-                # Resize frame for faster processing
-                small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-                rgb_small_frame = small_frame[:, :, ::-1]  # Convert BGR to RGB
+                # Convert to grayscale for face detection
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
-                # Find face locations and encodings
-                face_locations = face_recognition.face_locations(rgb_small_frame)
-                face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+                # Detect faces
+                faces = self.face_cascade.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(30, 30)
+                )
                 
                 # Process each face found
-                for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-                    # Scale back up face locations
-                    top *= 4
-                    right *= 4
-                    bottom *= 4
-                    left *= 4
+                for (x, y, w, h) in faces:
+                    # Draw rectangle around the face
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     
-                    # Check if the face matches any known face
-                    matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=0.6)
-                    name = "Unknown"
-                    face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
+                    # Recognize the face
+                    face_img = gray[y:y+h, x:x+w]
                     
-                    if len(face_distances) > 0:
-                        best_match_index = np.argmin(face_distances)
-                        if matches[best_match_index]:
-                            name = self.known_face_names[best_match_index]
+                    try:
+                        # Predict the id and confidence
+                        id_num, confidence = self.recognizer.predict(face_img)
+                        
+                        # Lower confidence means better match (0 is perfect match)
+                        if confidence < 70:  # Confidence threshold
+                            name = self.employee_ids.get(id_num, "Unknown")
+                            confidence_txt = f"{round(100 - confidence)}%"
+                            
                             # Mark attendance
                             self.mark_attendance(name)
+                        else:
+                            name = "Unknown"
+                            confidence_txt = f"{round(100 - confidence)}%"
+                        
+                        # Display name and confidence
+                        cv2.putText(frame, name, (x+5, y-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                        cv2.putText(frame, confidence_txt, (x+5, y+h+25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 1)
                     
-                    # Draw rectangle and name
-                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                    cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 255, 0), cv2.FILLED)
-                    cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 255, 255), 1)
+                    except Exception as e:
+                        print(f"Error during recognition: {e}")
                 
                 # Display result
                 cv2.imshow('Face Recognition Attendance', frame)
@@ -183,29 +246,38 @@ class FaceRecognitionAttendance:
                     print("Failed to capture image")
                     break
                 
+                # Convert to grayscale for face detection
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Detect faces
+                faces = self.face_cascade.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(30, 30)
+                )
+                
+                # Draw rectangle around detected faces
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                
                 # Display frame
                 cv2.imshow('Add Employee', frame)
                 
                 key = cv2.waitKey(1) & 0xFF
                 
                 if key == ord('c'):
-                    # Save the image
-                    filename = os.path.join(self.database_path, f"{name}.jpg")
-                    cv2.imwrite(filename, frame)
-                    
-                    # Check if face is detected in the saved image
-                    image = face_recognition.load_image_file(filename)
-                    face_encodings = face_recognition.face_encodings(image)
-                    
-                    if len(face_encodings) > 0:
-                        # Add to current session
-                        self.known_face_encodings.append(face_encodings[0])
-                        self.known_face_names.append(name)
-                        print(f"Successfully added {name} to database")
+                    if len(faces) > 0:
+                        # Save the image
+                        filename = os.path.join(self.database_path, f"{name}.jpg")
+                        cv2.imwrite(filename, frame)
+                        print(f"Successfully captured {name}'s face image")
+                        
+                        # Retrain the model with new data
+                        self.train_model()
                         break
                     else:
                         print("No face detected! Please try again.")
-                        os.remove(filename)  # Remove the file if no face detected
                 
                 elif key == ord('q'):
                     print("Cancelled adding employee")
@@ -217,16 +289,17 @@ class FaceRecognitionAttendance:
 
 if __name__ == "__main__":
     # Create attendance system
-    attendance_system = FaceRecognitionAttendance()
+    attendance_system = LightweightFaceAttendance()
     
     while True:
-        print("\nFace Recognition Attendance System")
+        print("\nLightweight Face Recognition Attendance System")
         print("1. Start Attendance System")
         print("2. Add New Employee")
         print("3. View Attendance Log")
-        print("4. Exit")
+        print("4. Retrain Model")
+        print("5. Exit")
         
-        choice = input("Enter your choice (1-4): ")
+        choice = input("Enter your choice (1-5): ")
         
         if choice == '1':
             attendance_system.run()
@@ -242,6 +315,8 @@ if __name__ == "__main__":
             else:
                 print("No attendance records found.")
         elif choice == '4':
+            attendance_system.train_model()
+        elif choice == '5':
             print("Exiting program")
             break
         else:
