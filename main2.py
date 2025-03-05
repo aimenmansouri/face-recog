@@ -123,13 +123,14 @@ class LightweightFaceAttendance:
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M:%S")
+        time_str_no_second = now.strftime("%H:%M:%S")
         
         # Check if person already marked attendance today
         already_marked = False
         if os.path.exists(self.attendance_log):
             with open(self.attendance_log, 'r') as file:
                 for line in file:
-                    if name in line and date_str in line:
+                    if name in line and date_str in line and time_str_no_second in line:
                         already_marked = True
                         break
         
@@ -152,7 +153,7 @@ class LightweightFaceAttendance:
         GPIO.output(self.led_pin, GPIO.HIGH)
         # Short beep
         GPIO.output(self.buzzer_pin, GPIO.HIGH)
-        time.sleep(0.5)
+        time.sleep(2)
         GPIO.output(self.led_pin, GPIO.LOW)
         GPIO.output(self.buzzer_pin, GPIO.LOW)
     
@@ -196,20 +197,22 @@ class LightweightFaceAttendance:
                         id_num, confidence = self.recognizer.predict(face_img)
                         
                         # Lower confidence means better match (0 is perfect match)
-                        if confidence < 70:  # Confidence threshold
+                        if confidence < 60:  # Confidence threshold
                             name = self.employee_ids.get(id_num, "Unknown")
                             confidence_txt = f"{round(100 - confidence)}%"
-                            
-                            # Mark attendance
-                            self.mark_attendance(name)
                         else:
                             name = "Unknown"
                             confidence_txt = f"{round(100 - confidence)}%"
-                        
+
                         # Display name and confidence
                         cv2.putText(frame, name, (x+5, y-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                         cv2.putText(frame, confidence_txt, (x+5, y+h+25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 1)
-                    
+
+                        if confidence <= 40 :
+                            cv2.putText(frame, name, (x+5, y-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            cv2.putText(frame, confidence_txt, (x+5, y+h+25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 1)
+                            cv2.imshow('Face Recognition Attendance', frame)
+                            self.mark_attendance(name)
                     except Exception as e:
                         print(f"Error during recognition: {e}")
                 
@@ -221,7 +224,7 @@ class LightweightFaceAttendance:
                     break
                 
                 # Short delay to reduce CPU usage
-                time.sleep(0.1)
+                time.sleep(0.2)
                 
         finally:
             # Cleanup
